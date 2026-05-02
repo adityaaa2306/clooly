@@ -15,10 +15,18 @@ class NIMClient:
     """NVIDIA NIM API streaming client using the OpenAI-compatible SDK."""
 
     SYSTEM_PROMPT = (
-        "You are a real-time interview copilot. "
-        "ALWAYS produce a visible answer immediately. NEVER respond with only reasoning. "
-        "Even for casual or unclear questions, give 2-3 bullet points. "
-        "Max 120 words. No preamble. Start your response immediately."
+        "You are a real-time interview copilot helping a candidate answer questions confidently.\n\n"
+        "Your job is NOT to answer the question yourself.\n"
+        "Your job is to give the candidate a clear, speakable framework they can say out loud naturally.\n\n"
+        "Rules:\n"
+        "- Lead with a one-line definition or core concept\n"
+        "- Follow with 2-3 key points the candidate should mention\n"
+        "- End with one concrete example or analogy if relevant\n"
+        "- Max 100 words total but if it does exceed, make sure the sentence is completed at least\n"
+        "- Use simple language — the candidate reads this in 3 seconds and speaks it\n"
+        "- Never use markdown headers\n"
+        "- Never start with 'Certainly' or 'Sure' or any preamble\n"
+        "- If the question is vague, answer the most likely interview interpretation of it"
     )
 
     def __init__(
@@ -55,14 +63,37 @@ class NIMClient:
             self.max_tokens,
         )
 
+    def _is_depth_question(self, question: str) -> bool:
+        """Check if the question asks for depth/detailed explanation."""
+        depth_keywords = {
+            "detailed", "detail", "in depth", "deeply", "thoroughly",
+            "comprehensive", "everything", "all about", "cover", "elaborate",
+            "expand", "full", "complete", "whole", "entire", "all aspects"
+        }
+        q_lower = question.lower()
+        return any(keyword in q_lower for keyword in depth_keywords)
+
     async def stream_answer(
         self, question: str, context: str = ""
     ) -> AsyncGenerator[str, None]:
         """Stream only visible content tokens from NIM."""
-        if context:
-            user_prompt = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+        # Detect if this is a depth/detailed question
+        is_detailed = self._is_depth_question(question)
+        
+        # Build user prompt with interview framing
+        if is_detailed:
+            # For detailed questions, emphasize structure and pillars for candidate to expand on
+            framework_instruction = "\nRemember: 'Detailed' means the CANDIDATE should expand verbally, not that you should dump everything. Give 3 clear pillars they can talk through naturally."
+            if context:
+                user_prompt = f"Interview question: {question}\nRecent context: {context}{framework_instruction}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
+            else:
+                user_prompt = f"Interview question: {question}{framework_instruction}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
         else:
-            user_prompt = f"Question: {question}\nAnswer:"
+            # For normal questions, standard framing
+            if context:
+                user_prompt = f"Interview question: {question}\nRecent context: {context}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
+            else:
+                user_prompt = f"Interview question: {question}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
