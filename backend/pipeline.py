@@ -1,4 +1,17 @@
-"""Async orchestrator: STT -> Context -> LLM -> WebSocket."""
+"""Async orchestrator: STT -> Context -> LLM -> WebSocket.
+
+Architectural Layers:
+1. Transcription: DeepgramSTTClient (real-time streaming speech-to-text)
+2. Question Detection: ContextEngine (5-stage pipeline with semantic classifier)
+3. Utterance Classification: UtteranceClassifier (8-type routing)
+4. Dialogue State: DialogueStateManager (tracks topic, misconceptions, confidence)
+5. Statement Assessment: StatementAssessor (evaluates correctness, finds misconceptions)
+6. Pedagogical Strategy: PedagogicalStrategyEngine (selects response type)
+7. Advanced Robustness:
+   - SilenceDetector: Detects 5s+ no-response confusion signals
+   - RepetitionTracker: Avoids repeating explanations
+   - CoreferenceResolver: Resolves pronouns to actual concepts
+"""
 
 import asyncio
 import logging
@@ -7,14 +20,29 @@ import time
 from typing import Any, Callable, Coroutine, Optional
 
 from backend.context import ContextEngine
+from backend.coreference_resolver import CoreferenceResolver
+from backend.dialogue_state import DialogueState, DialogueStateManager
 from backend.llm import NIMClient
+from backend.repetition_tracker import RepetitionTracker
+from backend.response_strategy import PedagogicalStrategyEngine, ResponseStrategy
+from backend.silence_detector import SilenceDetector
 from backend.stt import DeepgramSTTClient
+from backend.statement_assessment import StatementAssessor
+from backend.utterance_classifier import UtteranceClassifier
 
 logger = logging.getLogger(__name__)
 
 
 class CopilotPipeline:
-    """Orchestrates STT, context management, LLM streaming, and UI messages."""
+    """Orchestrates STT, context management, LLM streaming, and UI messages.
+
+    This pipeline implements the complete Cluely learning copilot architecture:
+    - STT → question detection → utterance classification
+    - Dialogue state tracking across exchanges
+    - Statement assessment and misconception identification
+    - Pedagogical strategy selection
+    - Advanced robustness: silence detection, repetition avoidance, coreference resolution
+    """
 
     def __init__(
         self,
@@ -23,6 +51,7 @@ class CopilotPipeline:
         stt_client: Optional[DeepgramSTTClient] = None,
         on_message: Optional[Callable[[dict], Coroutine[Any, Any, None]]] = None,
     ):
+        # Core components
         self.llm = llm_client or NIMClient()
         self.context = context_engine or ContextEngine()
         self.stt = stt_client
@@ -31,14 +60,42 @@ class CopilotPipeline:
             return None
 
         self.on_message = on_message or default_callback
+        
+        # Processing state
         self.is_processing_answer = False
         self.timing_logs: dict[str, float] = {}
         self.pending_answer_task: Optional[asyncio.Task] = None
+        
+        # Speaker tracking
         self._speaker_roles: dict[int, str] = {}
+        
+        # Utterance sequencing
         self._final_sequence = 0
         self._last_final_record: Optional[dict] = None
         self._last_processed_final_id = 0
         self._queued_final_records: list[dict] = []
+        
+        # ============ ARCHITECTURAL LAYER INITIALIZATION ============
+        
+        # Layer 3: Utterance Classification (8-type routing)
+        self.utterance_classifier = UtteranceClassifier()
+        
+        # Layer 4: Dialogue State Management
+        self.dialogue_state_manager = DialogueStateManager()
+        
+        # Layer 5: Statement Assessment (correctness + misconceptions)
+        self.statement_assessor = StatementAssessor()
+        
+        # Layer 6: Pedagogical Strategy Selection
+        self.strategy_engine = PedagogicalStrategyEngine()
+        
+        # Layer 7: Advanced Robustness
+        self.silence_detector = SilenceDetector()
+        self.repetition_tracker = RepetitionTracker()
+        self.coreference_resolver = CoreferenceResolver()
+        
+        logger.info("Pipeline initialized with full 7-layer architecture")
+
 
     async def initialize_stt(self) -> None:
         """Initialize the STT client with pipeline callbacks."""
@@ -64,6 +121,14 @@ class CopilotPipeline:
         )
 
     def _on_final(self, text: str, speaker: int, confidence: float) -> None:
+        """Process a final transcript.
+        
+        Feeds data into architectural layers:
+        - Dialogue state tracking
+        - Utterance classification
+        - Silence detector reset (response received)
+        - Coreference resolver context update
+        """
         speaker_name = self._speaker_name(speaker)
         logger.info("[FINAL] %s (conf=%.2f): %s", speaker_name, confidence, text)
 
@@ -79,6 +144,42 @@ class CopilotPipeline:
             "id": self._final_sequence,
         }
 
+        # ============ LAYER 3-4: Classify utterance and update dialogue state ============
+        try:
+            # Classify utterance type
+            utterance_classification = self.utterance_classifier.classify(text)
+            logger.info("Utterance classified: %s", utterance_classification.type.value)
+            
+            # Update dialogue state based on classification
+            if speaker_name == "user":
+                utterance_type = utterance_classification.type.value
+                # Track user confidence signals
+                if utterance_type == "correct_statement":
+                    self.dialogue_state_manager.state.record_correct_response()
+                elif utterance_type == "incorrect_statement":
+                    self.dialogue_state_manager.state.record_incorrect_response()
+                elif utterance_type == "frustrated_statement":
+                    self.dialogue_state_manager.state.record_confused_response()
+                elif utterance_type in ["clarification_question", "confirmation_question"]:
+                    self.dialogue_state_manager.state.record_clarification_request()
+            
+            # Extract concepts from utterance for coreference tracking
+            concepts = self.coreference_resolver.extract_noun_phrases(text)
+            self.coreference_resolver.update_context(text, concepts)
+            
+            # Signal silence detector that we received a response
+            if speaker_name == "user":
+                self.silence_detector.record_utterance(
+                    utterance_classification.type.value,
+                    is_question=utterance_classification.type.value in [
+                        "direct_question", "clarification_question", "confirmation_question"
+                    ]
+                )
+            
+        except Exception as e:
+            logger.error("Error processing final transcript: %s", e, exc_info=True)
+            # Don't fail the pipeline on classification errors; proceed anyway
+
         asyncio.create_task(
             self.on_message(
                 {
@@ -90,6 +191,7 @@ class CopilotPipeline:
             )
         )
 
+
     def _speaker_name(self, speaker: int) -> str:
         """First detected speaker is interviewer; the other speaker is candidate/user."""
         if speaker not in self._speaker_roles:
@@ -97,7 +199,10 @@ class CopilotPipeline:
         return self._speaker_roles[speaker]
 
     def _on_eot_handler(self) -> None:
-        """Handle end-of-turn detection from STT."""
+        """Handle end-of-turn detection from STT.
+        
+        Also checks for silence signals (prolonged no-response after question).
+        """
         if self.pending_answer_task and not self.pending_answer_task.done():
             if self._last_final_record:
                 self._queued_final_records.append(dict(self._last_final_record))
@@ -106,10 +211,30 @@ class CopilotPipeline:
             return
 
         logger.info("EOT detected")
+        
+        # ============ LAYER 7: Check for silence signals ============
+        try:
+            silence_event = self.silence_detector.check_silence()
+            if silence_event:
+                logger.warning(f"Silence signal detected: {silence_event}")
+                # This can be used for adaptive interventions in future
+        except Exception as e:
+            logger.error("Error checking silence: %s", e)
+        
         self.pending_answer_task = asyncio.create_task(self._process_answer_on_eot())
 
+
     async def _process_answer_on_eot(self, queued_record: Optional[dict] = None) -> None:
-        """Start LLM streaming after STT reports end-of-turn."""
+        """Start LLM streaming after STT reports end-of-turn.
+        
+        Full architectural pipeline:
+        1. Extract question and context
+        2. Check for repetition (avoid explaining same thing twice)
+        3. Resolve coreferences (pronouns → concepts)
+        4. Select pedagogical strategy based on dialogue state
+        5. Stream LLM response with strategy-guided system prompt
+        6. Track explanation for future repetition avoidance
+        """
         if self.is_processing_answer:
             logger.warning("Already processing answer, skipping")
             return
@@ -139,13 +264,74 @@ class CopilotPipeline:
             context_summary = self.context.get_summary()
             await self.on_message({"type": "status", "state": "processing"})
 
+            # ============ LAYER 5-6: Check repetition and select strategy ============
+            
+            # Check if this exact explanation was recently given (repetition avoidance)
+            is_repetition = False
+            try:
+                is_repetition, original_record = self.repetition_tracker.check_repetition(
+                    question, 
+                    self.dialogue_state_manager.state.topic or ""
+                )
+                if is_repetition:
+                    logger.info(
+                        f"Question within recent topic coverage; requesting variation "
+                        f"(original asked {original_record.age_seconds():.0f}s ago)"
+                    )
+            except Exception as e:
+                logger.error("Error checking repetition: %s", e)
+
+            # Resolve coreferences in the question (pronouns → concepts)
+            try:
+                resolved_question = self.coreference_resolver.resolve_in_sentence(
+                    question,
+                    topic=self.dialogue_state_manager.state.topic
+                )
+                if resolved_question != question:
+                    logger.info(f"Resolved coreferences: '{question}' → '{resolved_question}'")
+                    question = resolved_question
+            except Exception as e:
+                logger.error("Error resolving coreferences: %s", e)
+
+            # Select pedagogical strategy
+            strategy: Optional[ResponseStrategy] = None
+            try:
+                # Classify the question utterance
+                utterance_type = self.utterance_classifier.classify(question).type
+                
+                # Generate pedagogical instruction
+                strategy = self.strategy_engine.choose_strategy(
+                    utterance_type=utterance_type,
+                    dialogue_state=self.dialogue_state_manager.state
+                )
+                logger.info(f"Selected pedagogical strategy: {strategy}")
+            except Exception as e:
+                logger.error("Error selecting strategy: %s", e)
+                # Fallback to neutral strategy
+                strategy = self.strategy_engine.strategies.get("explain")
+
+            # Build enhanced system prompt with pedagogical guidance
+            enhanced_system_prompt = None
+            if strategy and self.dialogue_state_manager.state:
+                try:
+                    enhanced_system_prompt = self.strategy_engine.generate_system_prompt_instruction(
+                        self.dialogue_state_manager.state,
+                        strategy
+                    )
+                except Exception as e:
+                    logger.error("Error generating enhanced prompt: %s", e)
+
             first_token_time = None
             answer_tokens: list[str] = []
             llm_timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "2.5"))
 
             try:
                 async with asyncio.timeout(llm_timeout):
-                    async for token in self.llm.stream_answer(question, context_summary):
+                    async for token in self.llm.stream_answer(
+                        question,
+                        context_summary,
+                        system_prompt_override=enhanced_system_prompt
+                    ):
                         if first_token_time is None:
                             first_token_time = time.perf_counter()
                             time_to_first_token = (first_token_time - eot_time) * 1000
@@ -172,6 +358,30 @@ class CopilotPipeline:
             except asyncio.CancelledError:
                 logger.info("LLM stream cancelled")
                 raise
+            except TypeError as e:
+                # Handle case where llm.stream_answer doesn't accept system_prompt_override
+                logger.warning(
+                    "LLM client doesn't support system_prompt_override, retrying without: %s", e
+                )
+                try:
+                    async with asyncio.timeout(llm_timeout):
+                        async for token in self.llm.stream_answer(question, context_summary):
+                            if first_token_time is None:
+                                first_token_time = time.perf_counter()
+                                time_to_first_token = (first_token_time - eot_time) * 1000
+                                self.timing_logs["first_token_received"] = first_token_time
+                                self.timing_logs["time_to_first_token_ms"] = time_to_first_token
+
+                            await self.on_message({
+                                "type": "answer",
+                                "text": token,
+                                "chunk": True,
+                            })
+                            answer_tokens.append(token)
+                except Exception:
+                    logger.exception("Fallback LLM stream error")
+                    await self.on_message({"type": "status", "state": "error"})
+                    return
             except Exception:
                 logger.exception("LLM streaming error")
                 await self.on_message({"type": "status", "state": "error"})
@@ -187,6 +397,28 @@ class CopilotPipeline:
                 full_answer = "".join(answer_tokens)
                 logger.info("Answer complete in %.1fms (TTA)", total_time)
                 logger.info("Answer preview: %s", full_answer[:100])
+                
+                # ============ LAYER 7: Track explanation for repetition avoidance ============
+                try:
+                    self.repetition_tracker.add_explanation(
+                        topic=self.dialogue_state_manager.state.topic or "general",
+                        explanation=full_answer,
+                        concept_covered=question[:50],  # First 50 chars of question as concept ID
+                        depth_level="intermediate"
+                    )
+                except Exception as e:
+                    logger.error("Error tracking explanation: %s", e)
+                
+                # ============ LAYER 4: Update dialogue state with response ============
+                try:
+                    self.dialogue_state_manager.state.last_response_type = strategy.type if strategy else "unknown"
+                    self.dialogue_state_manager.state.add_explanation(
+                        topic=self.dialogue_state_manager.state.topic or "general",
+                        explanation=full_answer
+                    )
+                except Exception as e:
+                    logger.error("Error updating dialogue state: %s", e)
+                
                 self._log_timing_summary()
 
         finally:
@@ -201,6 +433,7 @@ class CopilotPipeline:
                 self.pending_answer_task = asyncio.create_task(
                     self._process_answer_on_eot(queued_question)
                 )
+
 
     def _pop_latest_queued_question(self) -> Optional[dict]:
         """Return the newest queued finalized interviewer question, if any."""

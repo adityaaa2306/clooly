@@ -22,9 +22,13 @@ class NIMClient:
         "- Lead with a one-line definition or core concept\n"
         "- Follow with 2-3 key points the candidate should mention\n"
         "- End with one concrete example or analogy if relevant\n"
-        "- For regular questions: 100-150 words. For detailed questions: 150-200 words max.\n"
+        "- Answer as completely as the question requires.\n"
+        "- If the question is simple, answer in 2-3 bullet points.\n"
+        "- If the question asks for multiple concepts or says 'in detail' or 'thoroughly', cover each concept fully before moving on.\n"
+        "- Never truncate an answer. Never stop mid-point.\n"
+        "- Always finish your last sentence completely.\n"
         "- Use simple language — the candidate reads this in 5-10 seconds and speaks it naturally\n"
-        "- Never use markdown headers\n"
+        "- Never use markdown headers or bold formatting\n"
         "- Never start with 'Certainly' or 'Sure' or any preamble\n"
         "- If the question is vague, answer the most likely interview interpretation of it"
     )
@@ -45,11 +49,8 @@ class NIMClient:
         self.model = model or os.getenv("NIM_MODEL", "openai/gpt-oss-20b")
         self.temperature = float(os.getenv("NIM_TEMPERATURE", temperature))
         self.top_p = float(os.getenv("NIM_TOP_P", top_p))
-        configured_max_tokens = int(os.getenv("MAX_TOKENS", max_tokens))
-        # Increased cap from 120 to 300: allows complete frameworks without cutting off mid-sentence
-        # 300 tokens ≈ 200-250 words, enough for "1-line definition + 3 pillars + example" format
-        max_tokens_cap = int(os.getenv("NIM_MAX_TOKENS_CAP", "300"))
-        self.max_tokens = min(configured_max_tokens, max_tokens_cap)
+        # Generous default; per-question max_tokens is estimated dynamically by complexity.
+        self.default_max_tokens = int(os.getenv("MAX_TOKENS", "1500"))
 
         self.client = OpenAI(
             base_url=self.base_url,
@@ -58,12 +59,38 @@ class NIMClient:
         )
 
         logger.info(
-            "NIM client initialized: model=%s temp=%.2f top_p=%.2f max_tokens=%s",
+            "NIM client initialized: model=%s temp=%.2f top_p=%.2f default_max_tokens=%s",
             self.model,
             self.temperature,
             self.top_p,
-            self.max_tokens,
+            self.default_max_tokens,
         )
+
+    def _estimate_tokens_for_question(self, question: str) -> int:
+        """Estimate required tokens based on question complexity."""
+        q = question.lower()
+        connectors = ["and", "also", "as well as", "along with", "plus", "both"]
+        concept_count = 1 + sum(1 for c in connectors if c in q)
+
+        if any(
+            w in q
+            for w in [
+                "detail",
+                "detailed",
+                "thoroughly",
+                "everything",
+                "full",
+                "complete",
+                "explain",
+            ]
+        ):
+            base = 600
+        elif any(w in q for w in ["what is", "define", "meaning"]):
+            base = 200
+        else:
+            base = 350
+
+        return min(base * concept_count, self.default_max_tokens)
 
     def _is_depth_question(self, question: str) -> bool:
         """Check if the question asks for depth/detailed explanation."""
@@ -79,20 +106,21 @@ class NIMClient:
         self, question: str, context: str = ""
     ) -> AsyncGenerator[str, None]:
         """Stream only visible content tokens from NIM."""
+        estimated_max_tokens = self._estimate_tokens_for_question(question)
+
         # Detect if this is a depth/detailed question
         is_detailed = self._is_depth_question(question)
         
         # Build user prompt with interview framing
         if is_detailed:
             # For detailed questions, emphasize structure and pillars for candidate to expand on
-            # Allocate more tokens (150-200 words) to give 3 clear pillars with good detail
             framework_instruction = "\nFor a DETAILED question: give 3 clear pillars with enough context that the candidate can expand on each one verbally. Don't dump everything, but give enough that they sound informed."
             if context:
                 user_prompt = f"Interview question: {question}\nRecent context: {context}{framework_instruction}\n\nGive the candidate a comprehensive framework they can talk through naturally."
             else:
                 user_prompt = f"Interview question: {question}{framework_instruction}\n\nGive the candidate a comprehensive framework they can talk through naturally."
         else:
-            # For normal questions, concise framing (100-150 words)
+            # For normal questions, concise framing.
             if context:
                 user_prompt = f"Interview question: {question}\nRecent context: {context}\n\nGive the candidate a concise framework to answer this out loud. Be clear and natural."
             else:
@@ -117,8 +145,9 @@ class NIMClient:
                     ],
                     temperature=self.temperature,
                     top_p=self.top_p,
-                    max_tokens=self.max_tokens,
+                    max_tokens=estimated_max_tokens,
                     stream=True,
+                    stop=None,
                     extra_body={"reasoning_effort": "low"}
                 )
 
@@ -142,7 +171,9 @@ class NIMClient:
                         "(reasoning chunks=%s); retrying once without streaming",
                         reasoning_count,
                     )
-                    fallback_answer = self._create_non_streaming_answer(user_prompt)
+                    fallback_answer = self._create_non_streaming_answer(
+                        user_prompt, estimated_max_tokens
+                    )
                     if fallback_answer:
                         token_count = 1
                         push(fallback_answer)
@@ -168,7 +199,9 @@ class NIMClient:
                 raise item
             yield str(item)
 
-    def _create_non_streaming_answer(self, user_prompt: str) -> str:
+    def _create_non_streaming_answer(
+        self, user_prompt: str, max_tokens: int
+    ) -> str:
         """Retry once when the stream contains only reasoning chunks."""
         try:
             completion = self.client.chat.completions.create(
@@ -179,8 +212,9 @@ class NIMClient:
                 ],
                 temperature=0.2,
                 top_p=self.top_p,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens,
                 stream=False,
+                stop=None,
             )
         except Exception as exc:
             logger.error("NIM non-streaming retry failed: %s", exc)
