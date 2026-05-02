@@ -22,8 +22,8 @@ class NIMClient:
         "- Lead with a one-line definition or core concept\n"
         "- Follow with 2-3 key points the candidate should mention\n"
         "- End with one concrete example or analogy if relevant\n"
-        "- Max 100 words total but if it does exceed, make sure the sentence is completed at least\n"
-        "- Use simple language — the candidate reads this in 3 seconds and speaks it\n"
+        "- For regular questions: 100-150 words. For detailed questions: 150-200 words max.\n"
+        "- Use simple language — the candidate reads this in 5-10 seconds and speaks it naturally\n"
         "- Never use markdown headers\n"
         "- Never start with 'Certainly' or 'Sure' or any preamble\n"
         "- If the question is vague, answer the most likely interview interpretation of it"
@@ -46,7 +46,9 @@ class NIMClient:
         self.temperature = float(os.getenv("NIM_TEMPERATURE", temperature))
         self.top_p = float(os.getenv("NIM_TOP_P", top_p))
         configured_max_tokens = int(os.getenv("MAX_TOKENS", max_tokens))
-        max_tokens_cap = int(os.getenv("NIM_MAX_TOKENS_CAP", "120"))
+        # Increased cap from 120 to 300: allows complete frameworks without cutting off mid-sentence
+        # 300 tokens ≈ 200-250 words, enough for "1-line definition + 3 pillars + example" format
+        max_tokens_cap = int(os.getenv("NIM_MAX_TOKENS_CAP", "300"))
         self.max_tokens = min(configured_max_tokens, max_tokens_cap)
 
         self.client = OpenAI(
@@ -83,17 +85,18 @@ class NIMClient:
         # Build user prompt with interview framing
         if is_detailed:
             # For detailed questions, emphasize structure and pillars for candidate to expand on
-            framework_instruction = "\nRemember: 'Detailed' means the CANDIDATE should expand verbally, not that you should dump everything. Give 3 clear pillars they can talk through naturally."
+            # Allocate more tokens (150-200 words) to give 3 clear pillars with good detail
+            framework_instruction = "\nFor a DETAILED question: give 3 clear pillars with enough context that the candidate can expand on each one verbally. Don't dump everything, but give enough that they sound informed."
             if context:
-                user_prompt = f"Interview question: {question}\nRecent context: {context}{framework_instruction}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
+                user_prompt = f"Interview question: {question}\nRecent context: {context}{framework_instruction}\n\nGive the candidate a comprehensive framework they can talk through naturally."
             else:
-                user_prompt = f"Interview question: {question}{framework_instruction}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
+                user_prompt = f"Interview question: {question}{framework_instruction}\n\nGive the candidate a comprehensive framework they can talk through naturally."
         else:
-            # For normal questions, standard framing
+            # For normal questions, concise framing (100-150 words)
             if context:
-                user_prompt = f"Interview question: {question}\nRecent context: {context}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
+                user_prompt = f"Interview question: {question}\nRecent context: {context}\n\nGive the candidate a concise framework to answer this out loud. Be clear and natural."
             else:
-                user_prompt = f"Interview question: {question}\n\nGive the candidate a framework to answer this out loud in an interview. Be concise and natural."
+                user_prompt = f"Interview question: {question}\n\nGive the candidate a concise framework to answer this out loud. Be clear and natural."
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
