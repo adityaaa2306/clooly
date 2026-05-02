@@ -20,9 +20,14 @@ and generates a short AI answer in **≤1.5 seconds total end-to-end**.
 | LLM Provider     | NVIDIA NIM API — `openai/gpt-oss-20b`              |
 | LLM Client       | `openai` Python SDK (OpenAI-compatible base_url)   |
 | IPC              | Electron ↔ Python via WebSocket on localhost       |
-| Audio Capture    | `pyaudio` (system mic, 16kHz mono 16-bit PCM)      |
+| Audio Capture    | `sounddevice` (system mic, 16kHz mono 16-bit PCM)      |
 
 ---
+    ## ⚙️ Python Version
+    - Required: Python 3.12.x
+    - Do NOT use Python 3.13 or 3.14 — pre-built wheels for aiohttp and pydantic-core do not exist yet
+    - Always create venv with: python -m venv .venv (not py -m venv)
+    ---
 
 ## 📁 Exact File/Folder Structure
 

@@ -1,22 +1,34 @@
-// electron/preload.js — Preload Script
-// Exposes a safe, typed API to the React renderer via contextBridge.
-// React accesses it as: window.electronAPI.onMessage(callback)
-
+// electron/preload.js - safe renderer bridge
 const { contextBridge, ipcRenderer } = require("electron");
 
+function backendHost() {
+  return process.env.BACKEND_HOST || "localhost";
+}
+
+function backendPort() {
+  return process.env.BACKEND_PORT || "8001";
+}
+
 contextBridge.exposeInMainWorld("electronAPI", {
-  // Receive messages from the main process (e.g. backend events forwarded via ipcMain)
   onMessage: (callback) => {
-    ipcRenderer.on("backend-message", (_event, data) => callback(data));
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("backend-message", listener);
+    return () => ipcRenderer.removeListener("backend-message", listener);
   },
 
-  // Send messages to the main process
   sendMessage: (channel, data) => {
     ipcRenderer.send(channel, data);
   },
 
-  // Backend WebSocket URL (renderer connects directly for low latency)
   getBackendWSUrl: () => {
-    return `ws://${process.env.BACKEND_HOST || "localhost"}:${process.env.BACKEND_PORT || 8000}/ws`;
+    return `ws://${backendHost()}:${backendPort()}/ws`;
+  },
+
+  getBackendHealthUrl: () => {
+    return `http://${backendHost()}:${backendPort()}/health`;
+  },
+
+  resizeWindow: (height) => {
+    ipcRenderer.send("resize-window", height);
   },
 });

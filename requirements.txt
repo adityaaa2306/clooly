@@ -1,13 +1,15 @@
 # Cluely MVP - Python Requirements
 # Install with: pip install -r requirements.txt
 
+
+
 # Web Framework
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 websockets==13.1
 
 # Deepgram STT
-deepgram-sdk==3.7.7
+deepgram-sdk==7.0.0
 
 # NVIDIA NIM LLM
 openai==1.54.4
@@ -23,6 +25,10 @@ pydantic-settings==2.5.2
 # Async Utilities
 aiohttp==3.10.10
 anyio==4.6.2
+
+# ML/NLP — Zero-shot question classification (CPU only)
+transformers==4.42.3
+torch==2.3.1  # CPU-only: remove this line and use torch[cuda] if GPU available
 
 # Testing
 pytest==8.3.3

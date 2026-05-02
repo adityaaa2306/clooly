@@ -3,22 +3,139 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self'; connect-src ws://localhost:8000" />
     <title>Cluely</title>
     <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      html, body, #root {
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
         width: 100%;
         height: 100%;
-        background: transparent;
+        margin: 0;
         overflow: hidden;
-        -webkit-app-region: drag;
+        background: transparent;
+        font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      }
+
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+
+      #debug-output {
+        position: fixed;
+        right: 8px;
+        bottom: 8px;
+        left: 8px;
+        z-index: 9999;
+        display: none;
+        max-height: 46px;
+        overflow: hidden;
+        padding: 6px 8px;
+        border: 1px solid rgba(99, 255, 168, 0.28);
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.72);
+        color: #9dffbd;
+        font-size: 10px;
+        line-height: 1.35;
+        pointer-events: none;
+        white-space: nowrap;
+      }
+
+      #debug-output .error {
+        color: #ff7b7b;
+      }
+
+      #debug-output.has-error {
+        display: block;
+      }
+
+      .boot-splash {
+        display: grid;
+        place-items: center;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.78);
+        color: #9dffbd;
+        font-size: 13px;
+        letter-spacing: 0;
       }
     </style>
   </head>
   <body>
-    <div id="root"></div>
-    <script src="dist/bundle.js"></script>
+    <div id="root">
+      <div class="boot-splash">CLUELY MVP</div>
+    </div>
+    <div id="debug-output" aria-hidden="true"></div>
+
+    <script>
+      (function () {
+        const output = document.getElementById("debug-output");
+        const maxLines = 4;
+
+        function formatError(error) {
+          if (!error) return "unknown";
+          if (error.stack) return error.stack.split("\n")[0];
+          if (error.message) return error.message;
+          return String(error);
+        }
+
+        window.cluelyDebugLog = function log(message, level) {
+          const line = document.createElement("div");
+          line.textContent = message;
+          if (level === "error") {
+            line.className = "error";
+            output.classList.add("has-error");
+          }
+          output.appendChild(line);
+
+          while (output.children.length > maxLines) {
+            output.removeChild(output.firstChild);
+          }
+
+          if (level === "error") {
+            console.error(message);
+          } else {
+            console.log(message);
+          }
+        };
+
+        window.addEventListener("error", function (event) {
+          window.cluelyDebugLog(
+            "[ERROR] " + event.message + " at " + event.filename + ":" + event.lineno,
+            "error"
+          );
+        });
+
+        window.addEventListener("unhandledrejection", function (event) {
+          window.cluelyDebugLog("[ERROR] " + formatError(event.reason), "error");
+        });
+
+        window.cluelyDebugLog("[OK] HTML page loaded");
+        window.cluelyDebugLog("[OK] DOM ready, root element exists");
+        window.cluelyDebugLog("[INFO] Loading React app bundle...");
+
+        const bundleScript = document.createElement("script");
+        bundleScript.src = "./dist/bundle.js";
+
+        bundleScript.onerror = function () {
+          window.cluelyDebugLog("[ERROR] Failed to load frontend/dist/bundle.js", "error");
+        };
+
+        bundleScript.onload = function () {
+          window.cluelyDebugLog("[OK] Bundle loaded and executed");
+        };
+
+        document.body.appendChild(bundleScript);
+        window.cluelyDebugLog("[OK] Bundle script appended to DOM");
+
+        window.setTimeout(function () {
+          const ready = document.documentElement.dataset.reactReady === "true";
+          window.cluelyDebugLog("[CHECK] React rendered: " + (ready ? "YES" : "NO"));
+        }, 700);
+      })();
+    </script>
   </body>
 </html>
